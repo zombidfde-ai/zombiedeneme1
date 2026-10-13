@@ -10,8 +10,7 @@ let groupId;
 let offset = 0;
 let shuttingDown = false;
 let polling = false;
-const cache = new Map();
-const cooldown = new Map();
+const requestLimits = new Map();
 const sleep = ms => new Promise(r=>setTimeout(r,ms));
 function parseKap(html) {
   const text = html.replace(/\\"/g, '"');
@@ -44,7 +43,9 @@ async function telegram(method,body) {
   return j.result;
 }
 function extractCodes(text) {
-  const tokens=String(text).toLocaleUpperCase('tr-TR').replace(/İ/g,'I').match(/[A-Z0-9]+/g) || [];
+  const normalized=String(text).normalize('NFKC').replace(/[\u200B-\u200D\uFEFF]/g,'')
+    .toLocaleUpperCase('tr-TR').replace(/İ/g,'I');
+  const tokens=normalized.match(/[\p{L}\p{N}]+/gu) || [];
   return [...new Set(tokens.filter(t=>symbols.has(t)))].slice(0,3);
 }
 function mean(v) {return v.reduce((a,b)=>a+b,0)/v.length;}
@@ -69,62 +70,96 @@ function analyze(bars) {
   const resistance=highs.length?Math.max(...highs):null;
   return {price:last.close,positive,negative,strength,support,resistance};
 }
-function formatAnalysis(code,bars,meta) {
-  const a=analyze(bars);
-  const n=x=>x.toLocaleString('tr-TR',{minimumFractionDigits:2,maximumFractionDigits:2});
-  const direction=a.positive?'Pozitif':a.negative?'Negatif':'Yatay / kararsız';
-  let comment=a.positive?'Yükseliş eğilimi öne çıkıyor.':a.negative?'Satış baskısı öne çıkıyor.':'Göstergeler net yön vermiyor.';
-  if(a.strength>=70) comment+=' RSI yüksek; geri çekilme riski artmış olabilir.';
-  else if(a.strength<=30) comment+=' RSI düşük; tepki ihtimali var, dönüş teyidi yok.';
-  const levels=[];
-  if(a.support) levels.push(`${n(a.support)} destek`);
-  if(a.resistance) levels.push(`${n(a.resistance)} direnç`);
-  const timestamp=new Date(meta.time*1000).toLocaleString('tr-TR',{timeZone:'Europe/Istanbul',dateStyle:'short',timeStyle:'short'});
-  const barDate=new Date(bars.at(-1).time*1000).toLocaleDateString('tr-TR',{timeZone:'Europe/Istanbul'});
-  const age=Date.now()/1000-meta.time;
-  const ageNote=age>4*86400?' Veri eski; güncel görünümü yansıtmayabilir.':'';
-  return `${code} | ${direction}\n${comment}\n${levels.length?levels.join(' • '):'Yakın seviye hesaplanamadı.'}\nSon fiyat: ${n(meta.price)} TL\nGünlük teknik görünüm (${barDate}); açık seans mumu değişebilir.\nYahoo Finance: ${timestamp} TSİ; gecikmeli olabilir.${ageNote}\nOtomatik teknik yorum; yatırım tavsiyesi değildir.`;
+function money(value) {
+  const cents=Math.round(value*100),whole=Math.floor(cents/100),part=cents%100;
+  return part?`${whole} lira ${String(part).padStart(2,'0')} kuruş`:`${whole} TL`;
 }
-async function getComment(code) {
-  const saved=cache.get(code);
-  if(saved && saved.until>Date.now()) return saved.text;
+function stamp(time) {
+  const d=new Date(time*1000);
+  const date=d.toLocaleDateString('tr-TR',{timeZone:'Europe/Istanbul',day:'numeric',month:'long'});
+  const hour=d.toLocaleTimeString('tr-TR',{timeZone:'Europe/Istanbul',hour:'2-digit',minute:'2-digit',hour12:false}).replace(':',' ');
+  return `${date} saat ${hour}`;
+}
+function formatAnalysis(code,bars,meta,question='') {
+  const a=analyze(bars);
+  const direction=a.positive?'pozitif':a.negative?'negatif':'kararsız';
+  let comment=a.positive?'yükseliş eğilimi korunuyor':a.negative?'satış baskısı öne çıkıyor':'net yön oluşmuş değil';
+  if(a.strength>=70) comment=a.positive?'yükseliş güçlü ancak kısa vadede yorulma riski var':'momentum yüksek ancak trend teyidi zayıf';
+  else if(a.strength<=30) comment=a.negative?'baskı sürüyor tepki gelse de dönüş teyidi yok':'tepki ihtimali var ancak güçlenme teyidi yok';
+  const recent=bars.slice(-21,-1).map(b=>b.volume).filter(v=>Number.isFinite(v) && v>0);
+  if(a.strength>30 && a.strength<70 && recent.length>=10 && Number.isFinite(meta.volume) && meta.volume>mean(recent)*1.5) {
+    comment=a.positive?'yükselişe yüksek işlem hacmi eşlik ediyor':a.negative?'düşüşe yüksek işlem hacmi eşlik ediyor':comment;
+  }
+  const levels=[];
+  if(a.support) levels.push(`Destek ${money(a.support)}`);
+  if(a.resistance) levels.push(`direnç ${money(a.resistance)}`);
+  const age=Date.now()/1000-meta.time;
+  const lines=[`${code} son fiyat ${money(meta.price)}`,`Günlük yön ${direction} ${comment}`];
+  if(levels.length) lines.push(levels.join('  '));
+  if(/lot|hacim|adet|tavan|taban|bekleyen/i.test(question)) {
+    if(Number.isFinite(meta.volume) && meta.volume>=0) lines.push(`Günlük gerçekleşen işlem miktarı ${Math.round(meta.volume)} adet`);
+    if(/tavan|taban|bekleyen/i.test(question)) lines.push('Tavan taban ve bekleyen lot verisi bu kaynakta yok');
+  }
+  lines.push(`Yahoo verisi ${stamp(meta.time)} TSİ ${age>4*86400?'eski veri':'gecikmeli olabilir'}`);
+  return lines.join('\n');
+}
+async function getComment(code,question='') {
   const ticker=encodeURIComponent(code+'.IS');
-  const url=`https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?range=6mo&interval=1d`;
-  const r=await fetch(url,{headers:{'User-Agent':'Mozilla/5.0'},signal:AbortSignal.timeout(15000)});
+  const url=`https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?range=6mo&interval=1d&_=${Date.now()}`;
+  const r=await fetch(url,{headers:{'User-Agent':'Mozilla/5.0','Cache-Control':'no-cache'},cache:'no-store',signal:AbortSignal.timeout(15000)});
   if(!r.ok) throw new Error('Fiyat kaynagi yanit vermedi');
   const j=await r.json(), data=j.chart?.result?.[0];
   if(!data || j.chart?.error || data.meta?.currency!=='TRY') throw new Error('Hisse verisi bulunamadi');
   const q=data.indicators?.quote?.[0];
   if(!q || !data.timestamp?.length) throw new Error('Fiyat gecmisi yok');
-  const bars=data.timestamp.map((time,i)=>({time,close:q.close[i],high:q.high[i],low:q.low[i]}))
+  const bars=data.timestamp.map((time,i)=>({time,close:q.close[i],high:q.high[i],low:q.low[i],volume:q.volume?.[i]}))
     .filter(b=>[b.time,b.close,b.high,b.low].every(Number.isFinite) && b.close>0);
-  const meta={time:data.meta.regularMarketTime,price:data.meta.regularMarketPrice};
+  const meta={time:data.meta.regularMarketTime,price:data.meta.regularMarketPrice,volume:data.meta.regularMarketVolume};
   if(!Number.isFinite(meta.time) || !Number.isFinite(meta.price)) throw new Error('Fiyat zamani yok');
-  const text=formatAnalysis(code,bars,meta);
-  cache.set(code,{text,until:Date.now()+300000});
-  return text;
+  const last=bars.at(-1);
+  if(!last) throw new Error('Fiyat gecmisi yok');
+  const day=t=>new Date(t*1000).toLocaleDateString('en-CA',{timeZone:'Europe/Istanbul'});
+  if(day(last.time)===day(meta.time)) {
+    last.close=meta.price;
+    last.high=Math.max(last.high,meta.price);
+    last.low=Math.min(last.low,meta.price);
+    if(!Number.isFinite(meta.volume)) meta.volume=last.volume;
+  } else throw new Error('Son fiyat ile gunluk veri tarihi uyusmuyor');
+  if(bars.length<50) {
+    return `${code} son fiyat ${money(meta.price)}\nTeknik yorum için yeterli günlük geçmiş yok\nYahoo verisi ${stamp(meta.time)} TSİ gecikmeli olabilir`;
+  }
+  return formatAnalysis(code,bars,meta,question);
 }
-async function handle(m) {
+async function handle(m,deps={}) {
   if(!m?.text || m.from?.is_bot) return;
   const privateChat=m.chat.type==='private';
   if(!privateChat && String(m.chat.id)!==String(groupId) && m.chat.username?.toLowerCase()!==GROUP) return;
-  const reply=async text=>telegram('sendMessage',{chat_id:m.chat.id,text,message_thread_id:m.message_thread_id,
+  const send=deps.telegram || telegram;
+  const comment=deps.getComment || getComment;
+  const reply=async text=>send('sendMessage',{chat_id:m.chat.id,text,message_thread_id:m.message_thread_id,
     reply_parameters:{message_id:m.message_id,allow_sending_without_reply:true}});
   if(/^\/(start|help)(@\w+)?(?:\s|$)/i.test(m.text)) {
-    await reply('Hisse kodunu yaz: ALFAS, THYAO, ASELS. Günlük fiyatlardan kısa teknik yorum veririm. /durum: liste bilgisi. Fiyat kaynağı gecikmeli veya geçici olarak kullanılamaz olabilir.');return;
+    await reply('ALFAS veya thyao yorumunuz nedir hocam gibi yazabilirsin\nSon alınan fiyatı ve kısa günlük teknik yorumu paylaşırım\nVeri gecikmeli olabilir');return;
   }
   if(/^\/durum(@\w+)?$/i.test(m.text.trim())) {
-    await reply(`Tanımlı hisse kodu: ${symbols.size}\nKAP liste tarihi: ${listDate}\nVeri: Yahoo Finance, günlük mumlar.\nHedef grup: @${GROUP}`);return;
+    await reply(`Tanımlı hisse kodu ${symbols.size}\nKAP listesi ${listDate.replace(/\./g,' ')}\nKaynak Yahoo Finance\nHer sorguda yeniden veri istenir\nHedef grup ${GROUP}`);return;
   }
   const codes=extractCodes(m.text);
   if(!codes.length) return;
   const userKey=`${m.chat.id}:${m.from?.id || m.sender_chat?.id}`;
-  if((cooldown.get(userKey) || 0)>Date.now()) return;
-  cooldown.set(userKey,Date.now()+10000);
+  // Eski 10 saniyelik sessiz engel art arda sorulari cevapsiz birakiyordu
+  // Artik dakikada 20 sorguya kadar tum sorular cevaplanir
+  let bucket=requestLimits.get(userKey);
+  if(!bucket || bucket.until<Date.now()) {bucket={count:0,until:Date.now()+60000,warned:false};requestLimits.set(userKey,bucket);}
+  if(bucket.count>=20) {
+    if(!bucket.warned) {bucket.warned=true;await reply('Çok hızlı sorgu geliyor bir dakika sonra tekrar deneyebilirsin');}
+    return;
+  }
+  bucket.count++;
   for(const code of codes) {
     let text;
-    try {text=await getComment(code);}
-    catch {text=`${code}: Doğrulanmış fiyat verisi alınamadı veya geçmiş yetersiz. Şu anda yorum üretemiyorum; biraz sonra tekrar dene.`;}
+    try {text=await comment(code,m.text);}
+    catch {text=`${code} için güncel fiyat verisi alınamadı\nŞu anda yorum üretemiyorum biraz sonra tekrar dene`;}
     await reply(text);
   }
 }
@@ -136,7 +171,7 @@ async function main() {
   await telegram('deleteWebhook',{drop_pending_updates:true});
   await refreshSymbols();
   const daily=setInterval(()=>void refreshSymbols(),86400000);daily.unref();
-  setInterval(()=>{for(const [k,v] of cooldown) if(v<Date.now()) cooldown.delete(k);for(const [k,v] of cache) if(v.until<Date.now()) cache.delete(k);},60000).unref();
+  setInterval(()=>{for(const [k,v] of requestLimits) if(v.until<Date.now()) requestLimits.delete(k);},60000).unref();
   console.log(`Bot hazir: ${symbols.size} hisse kodu`);
   polling=true;
   while(!shuttingDown) {
@@ -159,5 +194,5 @@ function startServer() {
   process.on('SIGTERM',()=>{shuttingDown=true;polling=false;server.close();setTimeout(()=>process.exit(0),5000).unref();});
   main().catch(e=>{console.error(e.message);process.exit(1);});
 }
-module.exports={parseKap,extractCodes,analyze,formatAnalysis,getComment};
+module.exports={parseKap,extractCodes,analyze,formatAnalysis,getComment,handle,money};
 if(require.main===module) startServer();
