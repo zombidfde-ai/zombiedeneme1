@@ -319,6 +319,7 @@ async function buildRuleReply(job,state,now,market) {
   mem.history=[...mem.history,{role:'user',text:job.text},{role:'assistant',text}].slice(-HISTORY_LIMIT);
   return {text,mem};
 }
+
 function memoryFor(state,key,now) {
   const old=state.memories[key];
   if(old && now-old.updatedAt<=TTL) return old;
