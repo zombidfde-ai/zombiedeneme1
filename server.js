@@ -42,7 +42,7 @@ function parseKap(html) {
 function extractCodes(text,symbols) {
   const tokens=String(text).normalize('NFKC').replace(/[\u200B-\u200D\uFEFF]/g,'')
     .toLocaleUpperCase('tr-TR').replace(/İ/g,'I').match(/[\p{L}\p{N}]+/gu) || [];
-  return [...new Set(tokens.filter(t=>symbols.has(t)))].slice(0,3);
+  return [...new Set(tokens.filter(t=>symbols.has(t)))].slice(0,10);
 }
 const mean = values => values.reduce((a,b)=>a+b,0)/values.length;
 function technical(bars) {
@@ -166,7 +166,7 @@ const CONCEPTS=[
 ];
 function findIntent(text,codes=[]) {
   const t=correct(text);
-  if(codes.length>=2 && /\b(mi|mu|hangisi|yoksa)\b/.test(t)) return {intent:'compare',confidence:1};
+  if(codes.length>=2 && (/\b(hangisi|yoksa|kiyas|karsilastir)\b/.test(t) || codes.some(c=>new RegExp('\\b'+c.toLowerCase()+'\\s+(mi|mu)\\b').test(t)))) return {intent:'compare',confidence:1};
   const scored=Object.entries(INTENTS).map(([intent,rule])=>({intent,score:rule.tests.reduce((n,[r,s])=>n+(r.test(t)?s:0),0)})).sort((a,b)=>b.score-a.score);
   if(!scored[0].score) return /umut|duzel|bu is|buralardan|hep eksi|nereye kadar|biter|bitecek|bitmez|satiyor/.test(t)?{intent:'outlook',confidence:0.8}:{intent:'unclear',confidence:0};
   if(scored[0].intent==='average') return {intent:'average',confidence:1};
@@ -175,7 +175,9 @@ function findIntent(text,codes=[]) {
 }
 function parseAmount(raw) {return literalNumbers(raw)[0] ?? null;}
 function extractDetails(text,waiting) {
-  const t=normalize(text).replace(/^(?:hocam|hoca|abi|kanka|merhaba)\s+/,''),p={};
+  let t=normalize(text).replace(/^(?:hocam|hoca|abi|kanka|merhaba)\s+/,'');
+  const p={};
+  if(waiting?.stock) t=t.replace(new RegExp('^'+waiting.stock.toLowerCase()+'\\s+'),'');
   let match=t.match(/(?:maliyet(?:im|i|in|imiz)?|ortalamam|ortalama maliyetim)\s*(?:ise|var|su|fiyat)?\s*(\d[\d.,]*)/)
     || t.match(/(\d[\d.,]*)\s*(?:tl|lira)?\s*(?:maliyetim|maliyetle|maliyet)/);
   if(match) p.cost=parseAmount(match[1]);
@@ -326,6 +328,7 @@ function marketScope(text,mem,symbols,at=Date.now()) {
     if(/maliyet|lotum|zararim|karim|ortalamam/.test(t)) return {scope:'stock-needed'};
     if(generic || findIntent(text,[]).intent!=='unclear' || /^(evet|aynen|peki|tamam)$/.test(t)) return {scope:'market',index:mem.focus.index || 'XU100',topic:marketTopic(text)};
   }
+  if((!recent || (!mem.lastSymbols?.length && mem.focus?.type!=='stock')) && /iceride kald|terste kald|zararda kald|zararday|maliyete gelem|elimde patla|mahsur kald/.test(t)) return {scope:'position-context'};
   if((!recent || (!mem.lastSymbols?.length && mem.focus?.type!=='stock')) && /baski|dusus|satislar|satiyor|cokus|panik|toparlan|ralli|hep eksi/.test(t)) return {scope:'market',index:'XU100',topic:marketTopic(text)};
   if(generic && (!recent || (!mem.lastSymbols?.length && mem.focus?.type!=='stock'))) return {scope:'context'};
   return null;
@@ -333,7 +336,10 @@ function marketScope(text,mem,symbols,at=Date.now()) {
 const indexNumber=n=>n.toLocaleString('tr-TR',{minimumFractionDigits:2,maximumFractionDigits:2})+' puan';
 async function buildMarketReply(job,mem,scope,now,market) {
   let text;
-  if(scope.scope==='context') {
+  if(scope.scope==='position-context') {
+    text='Zararda kalınca yalnızca maliyete dönmesini beklemek veya acele eklemek riski artırabilir\nElinizdeki hisseleri ve maliyetlerinizi yazarsanız ayrı ayrı değerlendirebilirim';
+    mem.waiting={kind:'stock',intent:'hold'};
+  } else if(scope.scope==='context') {
     text='Genel piyasayı mı yoksa belirli bir hisseyi mi değerlendiriyorsunuz';
     mem.waiting={kind:'scope'};
   } else if(scope.scope==='stock-needed') {
@@ -410,7 +416,7 @@ async function buildMarketReply(job,mem,scope,now,market) {
   return {text,mem};
 }
 
-async function buildRuleReply(job,state,now,market) {
+async function buildSingleReply(job,state,now,market) {
   const mem=structuredClone(memoryFor(state,job.key,now()));
   // Yanıtlanan bot sorusundaki bağlam yalnızca aynı üyeye aitse kullanılır
   if(job.context) {
@@ -481,6 +487,96 @@ async function buildRuleReply(job,state,now,market) {
   return {text,mem};
 }
 
+function splitQuestions(message,symbols,random=Math.random) {
+  if(!message?.text) return [message];
+  const source=message.text.normalize('NFKC');
+  const upper=source.toLocaleUpperCase('tr-TR').replace(/İ/g,'I');
+  const mentions=[...upper.matchAll(/[\p{L}\p{N}]+/gu)].filter(m=>symbols.has(m[0]));
+  const codes=[...new Set(mentions.map(m=>m[0]))].slice(0,10);
+  if(codes.length<2 || findIntent(source,codes).intent==='compare') return [message];
+  const segments=mentions.filter(m=>codes.includes(m[0])).map((m,i,list)=>({code:m[0],
+    text:source.slice(m.index,list[i+1]?.index ?? source.length).trim()}));
+  const prefix=source.slice(0,mentions[0].index);
+  const prefixIntent=findIntent(prefix,[]).intent;
+  const meaningful=segments.map(s=>findIntent(s.text,[s.code]).intent).filter(i=>i!=='unclear');
+  const intents=[...new Set(meaningful)];
+  const common=prefixIntent!=='unclear'?prefixIntent:intents.length===1?intents[0]:null;
+  const delay=30000+Math.min(15000,Math.floor(Math.max(0,Math.min(1,random()))*15001));
+  return codes.map(code=>{
+    let text=segments.filter(s=>s.code===code).map(s=>s.text).join(' ');
+    const remainder=normalize(text).replace(new RegExp('\\b'+code.toLowerCase()+'\\b','g'),'').replace(/\b(ve|ile|da|de)\b/g,'').replace(/[.,]/g,'').trim();
+    if(common && findIntent(text,[code]).intent==='unclear' && !remainder) text+=' '+INTENTS[common].label;
+    return {...message,text,_originalText:message.text,_partId:code,_batchId:`${message.chat.id}:${message.message_id}`,_batchDelay:delay};
+  });
+}
+const REPLY_VARIANTS=[
+  ['Mevcut maliyetiniz nedir',['Mevcut maliyetiniz nedir','Ortalama alış maliyetinizi paylaşabilir misiniz','Mevcut alış maliyetiniz kaç TL']],
+  ['Kaç lotunuz bulunuyor',['Kaç lotunuz bulunuyor','Elinizdeki lot miktarını paylaşabilir misiniz','Mevcut pozisyonunuz kaç lot']],
+  ['Günlük yön negatif satış baskısı öne çıkıyor',['Günlük yön negatif satış baskısı öne çıkıyor','Günlük görünüm zayıf fiyat ortalamaların altında','Günlük trend aşağı yönlü toparlanma teyidi henüz zayıf']],
+  ['Günlük yön pozitif yükseliş eğilimi korunuyor',['Günlük yön pozitif yükseliş eğilimi korunuyor','Günlük görünüm güçlü fiyat ortalamaların üzerinde','Günlük trend yukarı yönlü güçlenme korunuyor']],
+  ['Yeni alım açısından düşüşün durduğuna dair teyit zayıf',['Yeni alım açısından düşüşün durduğuna dair teyit zayıf','Yeni giriş için kalıcı toparlanma teyidi henüz zayıf','Alımda acele etmek yerine dönüşün güçlenmesini izlemek daha temkinli']],
+  ['Günlük görünüm kararsız yön teyidi zayıf',['Günlük görünüm kararsız yön teyidi zayıf','Günlük göstergeler net yön vermiyor','Günlük trendde belirgin bir üstünlük oluşmuş değil']]
+];
+function varyReply(text,mem) {
+  mem.replyVariants=mem.replyVariants || {};
+  for(let i=0;i<REPLY_VARIANTS.length;i++) {
+    const [original,variants]=REPLY_VARIANTS[i];
+    if(!text.includes(original)) continue;
+    const n=mem.replyVariants[i] || 0;
+    text=text.replace(original,variants[n%variants.length]);mem.replyVariants[i]=n+1;
+  }
+  return text;
+}
+async function buildRuleReply(job,state,now,market) {
+  const mem=structuredClone(memoryFor(state,job.key,now()));
+  mem.waitingByStock=mem.waitingByStock || {};
+  if(mem.waiting?.kind==='position' && mem.lastSymbols?.length===1) {
+    const c=mem.waiting.stock || mem.lastSymbols[0];
+    if(!mem.waitingByStock[c]) mem.waitingByStock[c]=structuredClone(mem.waiting);
+  }
+  const explicit=extractCodes(job.text,new Set(state.symbols));
+  const waitingCodes=Object.keys(mem.waitingByStock);
+  const ambiguousCandidates=waitingCodes.length?waitingCodes:job.ambiguousCosts || [];
+  const stripped=normalize(job.text).replace(/^(?:hocam|hoca)\s+/,'');
+  const bare=/^\d[\d.,]*(?:\s*(?:tl|lira))?$/.test(stripped);
+  if(bare && explicit.length===0 && !job.context && ambiguousCandidates.length>1) {
+    const codes=ambiguousCandidates;
+    const value=parseAmount(stripped);
+    mem.numberClarification={value,codes,at:now()};
+    const text=`Bu tutar ${codes.join(' veya ')} hisselerinden hangisine ait`;
+    mem.updatedAt=now();mem.history=[...mem.history,{role:'user',text:job.text},{role:'assistant',text}].slice(-HISTORY_LIMIT);
+    return {text,mem};
+  }
+  let working={...job};
+  if(explicit.length===1 && mem.numberClarification && now()-mem.numberClarification.at<15*MINUTE && mem.numberClarification.codes.includes(explicit[0])) {
+    const code=explicit[0],waiting=mem.waitingByStock[code] || {kind:'position',intent:'outlook',fields:['cost']};
+    const value=mem.numberClarification.value;
+    if(Number.isFinite(value)) working.text=`${code} ${waiting.fields?.[0]==='quantity'?`${value} lot`:`maliyetim ${value}`}`;
+    working.context={owner:job.key,codes:[code],intent:waiting.intent,waiting,focus:{type:'stock',codes:[code]}};
+    delete mem.numberClarification;
+  }
+  const target=explicit.length===1?explicit[0]:working.context?.codes?.length===1?working.context.codes[0]:bare && waitingCodes.length===1?waitingCodes[0]:mem.focus?.type!=='market' && mem.lastSymbols?.length===1?mem.lastSymbols[0]:null;
+  if(target) {
+    const oldSame=mem.lastSymbols?.length===1 && mem.lastSymbols[0]===target;
+    mem.waiting=mem.waitingByStock[target] || (mem.waiting?.kind==='stock'?mem.waiting:undefined) || (oldSame?mem.waiting:undefined);
+    if(mem.waiting?.kind==='position' || mem.waiting?.kind==='plan') mem.waiting.stock=target;
+    mem.lastSymbols=[target];mem.focus={type:'stock',codes:[target]};
+    if(working.context?.codes?.length && !working.context.codes.includes(target)) working.context=null;
+  }
+  const shadow={...state,memories:{...state.memories,[job.key]:mem}};
+  const result=await buildSingleReply(working,shadow,now,market);
+  result.mem.waitingByStock={...mem.waitingByStock,...result.mem.waitingByStock};
+  if(target) {
+    if(result.mem.waiting?.kind==='position' || result.mem.waiting?.kind==='plan') {
+      result.mem.waiting.stock=target;result.mem.waitingByStock[target]=structuredClone(result.mem.waiting);
+    } else delete result.mem.waitingByStock[target];
+  }
+  result.text=varyReply(result.text,result.mem);
+  if(result.mem.history.at(-1)?.role==='assistant') result.mem.history.at(-1).text=result.text;
+  if(result.mem.history.at(-2)?.role==='user') result.mem.history.at(-2).text=job.text;
+  return result;
+}
+
 function memoryFor(state,key,now) {
   const old=state.memories[key];
   if(old && now-old.updatedAt<=TTL) return old;
@@ -491,6 +587,7 @@ function createEngine(store,{now=Date.now,market=marketData,send,botId,botUserna
   state.sentAnswers=state.sentAnswers || {};
   state.replyContexts=state.replyContexts || {};
   state.recentInputs=state.recentInputs || {};
+  state.batchReplyAt=state.batchReplyAt || {};
   if(state.dialogueVersion!==34) {
     for(const mem of Object.values(state.memories)) {
       if(mem.waiting?.kind==='position' && !mem.waiting.fields) {
@@ -517,6 +614,21 @@ function createEngine(store,{now=Date.now,market=marketData,send,botId,botUserna
     state.jobs=rebuilt;state.dialogueVersion=34;store.save();
   }
   const active=new Set(),activeUsers=new Set();
+  if(state.multiVersion!==400) {
+    const jobs=[];
+    for(const job of state.jobs) {
+      if(job.partId) {jobs.push(job);continue;}
+      const parts=splitQuestions({text:job.text,chat:{id:job.chatId},message_id:job.messageId},new Set(state.symbols),random);
+      if(parts.length===1) {jobs.push(job);continue;}
+      if(state.sentAnswers[`${job.chatId}:${job.messageId}`]) continue;
+      for(const part of parts) {
+        const child={...job,id:crypto.randomUUID(),text:part.text,texts:[part.text],partId:part._partId,batchId:part._batchId};
+        delete child.answer;delete child.memory;delete child.preparedAt;
+        jobs.push(child);
+      }
+    }
+    state.jobs=jobs;state.multiVersion=400;store.save();
+  }
   let closing=false;
   const keyFor=m=>`${m.chat.id}:${m.message_thread_id || 0}:${m.from?.id || m.sender_chat?.id}`;
   function eligible(m) {
@@ -539,9 +651,10 @@ function createEngine(store,{now=Date.now,market=marketData,send,botId,botUserna
   }
   function ingest(update) {
     if(update.update_id<state.offset) return;
-    const m=update.message;
+    const parts=splitQuestions(update.message,new Set(state.symbols),random);
+    for(const m of parts) {
     if(eligible(m)) {
-      const key=keyFor(m),messageKey=`${m.chat.id}:${m.message_id}`;
+      const key=keyFor(m),messageKey=`${m.chat.id}:${m.message_id}${m._partId?':'+m._partId:''}`;
       const normalized=normalize(m.text),recent=state.recentInputs[key];
       const duplicate=state.sentAnswers[messageKey] || state.jobs.some(j=>j.key===key && (j.texts || [j.text]).some(t=>normalize(t)===normalized))
         || (recent && recent.text===normalized && now()-recent.at<90000);
@@ -559,7 +672,12 @@ function createEngine(store,{now=Date.now,market=marketData,send,botId,botUserna
           if(codes.length) context={owner:key,codes,intent:expected,
             waiting:/maliyet/i.test(q)?{kind:'position',intent:expected,fields:['cost']}:/lot/i.test(q)?{kind:'position',intent:expected,fields:['quantity']}:null};
         }
-        const pending=[...state.jobs].reverse().find(j=>j.key===key && !active.has(j.id));
+        const contextStock=context?.codes?.length===1?context.codes[0]:null;
+        const pending=[...state.jobs].reverse().find(j=>j.key===key && !active.has(j.id) && (!contextStock || extractCodes(j.text,new Set(state.symbols)).includes(contextStock)));
+        const waitingCodes=Object.keys(state.memories[key]?.waitingByStock || {});
+        const pendingCodesAll=[...new Set(state.jobs.filter(j=>j.key===key).flatMap(j=>extractCodes(j.text,new Set(state.symbols))))];
+        const numeric=/^\d[\d.,]*(?:\s*(?:tl|lira))?$/.test(normalize(m.text).replace(/^(?:hocam|hoca)\s+/,''));
+        const ambiguousCodes=numeric && !context?[...new Set([...waitingCodes,...pendingCodesAll])]:[];
         const details=extractDetails(m.text,state.memories[key]?.waiting || context?.waiting);
         const supplied=Object.keys(details).some(k=>k!=='closed');
         const direct=extractCodes(m.text,new Set(state.symbols));
@@ -568,28 +686,29 @@ function createEngine(store,{now=Date.now,market=marketData,send,botId,botUserna
         const currentIntent=findIntent(m.text,direct).intent;
         const pendingIntent=pending?findIntent(pending.text,pendingCodes).intent:'unclear';
         const continuation=supplied && (['unclear','outlook'].includes(currentIntent) || currentIntent===pendingIntent || (currentIntent==='hold' && /beklerim/.test(normalize(m.text))));
-        if(pending && continuation && sameStock && now()-pending.createdAt<MINUTE) {
+        if(ambiguousCodes.length<2 && pending && continuation && sameStock && now()-pending.createdAt<MINUTE) {
           pending.texts=[...(pending.texts || [pending.text]),m.text.slice(0,4000)];
-          pending.text=pending.texts.join('\n');pending.messageId=m.message_id;pending.quote=m.text.slice(0,120);
+          pending.text=pending.texts.join('\n');pending.messageId=m.message_id;pending.quote=(m._originalText || m.text).slice(0,120);
           if(context) pending.context=context;
           delete pending.answer;delete pending.memory;
         } else {
           if(state.jobs.filter(j=>j.key===key).length>=20 || state.jobs.length>=1000) throw new Error('Soru kuyrugu dolu');
           // 30 ile 45 sn arasinda basla fiyat sorgusu icin de zaman birak
-          const delay=30000+Math.min(15000,Math.floor(Math.max(0,Math.min(1,random()))*15001));
+          const delay=m._batchDelay ?? 30000+Math.min(15000,Math.floor(Math.max(0,Math.min(1,random()))*15001));
           state.jobs.push({id:crypto.randomUUID(),updateId:update.update_id,key,chatId:m.chat.id,threadId:m.message_thread_id,
-            messageId:m.message_id,quote:m.text.slice(0,120),text:m.text.slice(0,4000),texts:[m.text.slice(0,4000)],context,
+            messageId:m.message_id,partId:m._partId,batchId:m._batchId,ambiguousCosts:ambiguousCodes.length>1?ambiguousCodes:null,quote:(m._originalText || m.text).slice(0,120),text:m.text.slice(0,4000),texts:[m.text.slice(0,4000)],context,
             createdAt:now(),notBefore:now()+delay,deadline:now()+MINUTE,attempts:0,revision:state.revisions[key] || 0});
         }
         state.recentInputs[key]={text:normalized,at:now()};
       }
+    }
     }
     state.offset=update.update_id+1;store.save();
   }
   async function processJob(job) {
     active.add(job.id);activeUsers.add(job.key);
     try {
-      const messageKey=`${job.chatId}:${job.messageId}`;
+      const messageKey=`${job.chatId}:${job.messageId}${job.partId?':'+job.partId:''}`;
       if(state.sentAnswers[messageKey] || job.revision!==(state.revisions[job.key] || 0)) {
         state.jobs=state.jobs.filter(j=>j.id!==job.id);store.save();return;
       }
@@ -614,6 +733,7 @@ function createEngine(store,{now=Date.now,market=marketData,send,botId,botUserna
       state.sentAnswers[messageKey]={at:now(),botMessageId:result?.message_id};
       if(result?.message_id) state.replyContexts[`${job.chatId}:${result.message_id}`]={owner:job.key,codes:job.memory.focus?.type==='market'?[]:job.memory.lastSymbols,
         intent:job.memory.lastIntent,waiting:job.memory.waiting || null,focus:job.memory.focus || null,at:now()};
+      if(job.batchId) state.batchReplyAt[job.batchId]=now();
       state.lastReply[String(job.chatId)]=now();state.jobs=state.jobs.filter(j=>j.id!==job.id);store.save();
     } catch(e) {
       if(e.storage) throw e;
@@ -631,7 +751,7 @@ function createEngine(store,{now=Date.now,market=marketData,send,botId,botUserna
     for(const job of state.jobs) {
       if(active.size>=maxConcurrent) break;
       if(seen.has(job.key)) continue;seen.add(job.key);
-      if(activeUsers.has(job.key) || now()<job.notBefore) continue;
+      if(activeUsers.has(job.key) || now()<job.notBefore || (job.batchId && state.batchReplyAt[job.batchId] && now()<state.batchReplyAt[job.batchId]+3000)) continue;
       tasks.push(processJob(job));
     }
     await Promise.all(tasks);
@@ -641,6 +761,7 @@ function createEngine(store,{now=Date.now,market=marketData,send,botId,botUserna
     for(const [key,item] of Object.entries(state.sentAnswers)) if(now()-item.at>7*86400000) delete state.sentAnswers[key];
     for(const [key,item] of Object.entries(state.replyContexts)) if(now()-item.at>7*86400000) delete state.replyContexts[key];
     for(const [key,item] of Object.entries(state.recentInputs)) if(now()-item.at>MINUTE*15) delete state.recentInputs[key];
+    for(const [key,at] of Object.entries(state.batchReplyAt)) if(now()-at>86400000) delete state.batchReplyAt[key];
     store.save();
   }
   return {ingest,tick,forget,cleanup,keyFor,build:job=>buildRuleReply(job,state,now,market),close(){closing=true;},isBusy:()=>active.size>0};
@@ -666,7 +787,7 @@ async function telegram(method, body) {
   return result.result;
 }
 async function main() {
-  console.log('BIST BOT 3.4.0 TEK SERVER');
+  console.log('BIST BOT 4.0.0 COKLU HISSE');
   if(!BOT_TOKEN || BOT_TOKEN==='BURAYA_BOT_TOKENINI_YAZ') throw new Error('server.js basindaki BOT_TOKEN alanina tokenini yaz');
   const store=createStore(process.env.DATA_DIR || './data');
   const state=store.state;
@@ -722,7 +843,8 @@ async function main() {
     }
   }
 }
-module.exports={marketTopic,marketScope,buildMarketReply,indexNumber,createStore,createEngine,extractCodes,parseKap,technical,calculations,literalNumbers,marketData,money,normalize,distance,findIntent,resolve,extractDetails,buildRuleReply,personalizedReply};
+module.exports={splitQuestions,varyReply,buildSingleReply,marketTopic,marketScope,buildMarketReply,indexNumber,createStore,createEngine,extractCodes,parseKap,technical,calculations,literalNumbers,marketData,money,normalize,distance,findIntent,resolve,extractDetails,buildRuleReply,personalizedReply};
 if(require.main===module) main().catch(e=>{console.error(e.message);process.exit(1);});
+
 
 
