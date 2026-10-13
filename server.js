@@ -61,7 +61,7 @@ function technical(bars) {
 }
 async function marketData(code,fetchFn=fetch) {
   const url=`https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(code+'.IS')}?range=6mo&interval=1d&_=${Date.now()}`;
-  const r=await fetchFn(url,{headers:{'User-Agent':'Mozilla/5.0','Cache-Control':'no-cache'},cache:'no-store',signal:AbortSignal.timeout(15000)});
+  const r=await fetchFn(url,{headers:{'User-Agent':'Mozilla/5.0','Cache-Control':'no-cache'},cache:'no-store',signal:AbortSignal.timeout(12000)});
   if(!r.ok) throw new Error('Piyasa verisi alinamadi');
   const j=await r.json(),d=j.chart?.result?.[0],q=d?.indicators?.quote?.[0];
   if(!d || j.chart?.error || !q || d.meta.currency!=='TRY' || !Number.isFinite(d.meta.regularMarketPrice) || !Number.isFinite(d.meta.regularMarketTime)) throw new Error('Piyasa verisi gecersiz');
@@ -167,7 +167,7 @@ function findIntent(text,codes=[]) {
 }
 function parseAmount(raw) {return literalNumbers(raw)[0] ?? null;}
 function extractDetails(text,waiting) {
-  const t=normalize(text),p={};
+  const t=normalize(text).replace(/^(?:hocam|hoca|abi|kanka|merhaba)\s+/,''),p={};
   let match=t.match(/(?:maliyet(?:im|i|in|imiz)?|ortalamam|ortalama maliyetim)\s*(?:ise|var|su|fiyat)?\s*(\d[\d.,]*)/)
     || t.match(/(\d[\d.,]*)\s*(?:tl|lira)?\s*(?:maliyetim|maliyetle|maliyet)/);
   if(match) p.cost=parseAmount(match[1]);
@@ -182,9 +182,9 @@ function extractDetails(text,waiting) {
   }
   if(waiting?.kind==='plan' && p.quantity) {p.addQuantity=p.quantity;delete p.quantity;}
   if(waiting?.kind==='plan' && !p.addQuantity && /^\d[\d.,]*$/.test(t)) p.addQuantity=parseAmount(t);
-  if(/kisa vade|gunluk|gun ici|bugun|yarin|bir.{0,5}gun|\d+\s*gun/.test(t)) p.horizon='kısa vade';
-  else if(/hafta|orta vade/.test(t)) p.horizon='birkaç hafta';
-  else if(/uzun|ay|sene|yil/.test(t)) p.horizon='uzun vade';
+  if(/\bkisa vade\b|\bgunluk\b|\bgun ici\b|\bbugun\b|\byarin\b|\bbir(?:kac)? gun\b|\b\d+\s*gun\b/.test(t)) p.horizon='kısa vade';
+  else if(/\bhafta(?:lik)?\b|\borta vade\b/.test(t)) p.horizon='birkaç hafta';
+  else if(/\buzun(?: vade)?\b|\bay(?:lik)?\b|\bsene(?:lik)?\b|\byil(?:lik)?\b/.test(t)) p.horizon='uzun vade';
   if(/risk.{0,15}(dusuk|az)|temkinli|risk istem|zarara dayanam/.test(t)) p.risk='düşük';
   else if(/yuksek risk|risk alabil|riske girebil/.test(t)) p.risk='yüksek';
   else if(/orta risk/.test(t)) p.risk='orta';
@@ -214,6 +214,11 @@ function resolve(text,mem,symbols) {
   const supplied=Object.keys(details).some(k=>k!=='closed');
   if(waiting && waiting.kind!=='intent' && (supplied || details.closed || (explicit.length && waiting.kind==='stock'))) {
     if(result.intent==='unclear' || result.intent==='outlook' || (result.intent==='hold' && /\bbeklerim\b/.test(t)) || (waiting.intent==='average' && result.intent==='add')) result={intent:waiting.intent,confidence:1};
+  }
+  if(supplied && result.intent==='unclear') {
+    const previous=mem.lastIntent || [...(mem.history || [])].reverse().filter(h=>h.role==='user').map(h=>findIntent(h.text,codes).intent).find(i=>!['unclear','outlook'].includes(i));
+    if(previous) result={intent:previous,confidence:1};
+    else if(details.cost || details.quantity) result={intent:'outlook',confidence:1};
   }
   if(learned && waiting.phrase) {
     mem.aliases=mem.aliases || {};
@@ -252,8 +257,8 @@ function personalizedReply(intent,facts,profile) {
   const longer=profile.horizon==='uzun vade';
   let first='',second='';
   if(intent==='add') {
-    first=t.direction==='negatif'?'Düşüş sürerken ekleme yapmak pozisyon riskini büyütür':high?'Yükseliş güçlü olsa da bu bölgede ekleme kısa vadeli geri çekilme riski taşır':'Eklemede tek sefer yerine teyit ve pozisyon büyüklüğünü birlikte değerlendirmek daha temkinli';
-    second=support?`${support} korunmadan maliyet düşürmek tek başına avantaj sağlamaz`:'Yeni ekleme için net destek teyidi yok';
+    first=t.direction==='negatif'?(profile.cost && m.price<profile.cost?`${money(profile.cost)} maliyetinizin altında düşüş sürüyor ekleme için teyit zayıf`:'Düşüş sürüyor ekleme yerine dönüş teyidi beklemek daha temkinli'):high?'Yükseliş güçlü ancak bu bölgede ekleme kısa vadeli geri çekilme riski taşıyor':t.direction==='pozitif'?'Destek korundukça kademeli ekleme değerlendirilebilir':'Görünüm kararsız ekleme için yön teyidi beklemek daha temkinli';
+    second=support?`${support} kaybedilirse baskı artabilir ekleme senaryosu zayıflar`:'Yeni ekleme için net destek teyidi yok';
   } else if(intent==='buy') {
     first=t.direction==='negatif'?'Yeni alım açısından düşüşün durduğuna dair teyit zayıf':high?'Yükseliş güçlü ancak kısa vadeli yorulma riski artmış':'Yeni alım için günlük trend ve destek teyidi birlikte izlenebilir';
     second=t.direction==='pozitif' && resistance?`${resistance} direnci yakınsa risk getiri alanı daralabilir`:support?`${support} altında kalıcılık alım senaryosunu zayıflatır`:'Net seviye teyidi olmadan güçlü giriş beklentisi yok';
@@ -275,6 +280,17 @@ function personalizedReply(intent,facts,profile) {
 }
 async function buildRuleReply(job,state,now,market) {
   const mem=structuredClone(memoryFor(state,job.key,now()));
+  // Yanıtlanan bot sorusundaki bağlam yalnızca aynı üyeye aitse kullanılır
+  if(job.context) {
+    if(!extractCodes(job.text,new Set(state.symbols)).length && job.context.codes?.length) mem.lastSymbols=job.context.codes;
+    if(job.context.owner===job.key && job.context.intent) {
+      mem.lastIntent=job.context.intent;
+      if(job.context.waiting) mem.waiting=job.context.waiting;
+    } else if(job.context.owner!==job.key) {
+      // Baska uyenin maliyetini veya niyetini aktarma
+      mem.lastIntent='outlook';delete mem.waiting;
+    }
+  }
   const route=resolve(job.text,mem,new Set(state.symbols));
   const {intent,codes,details}=route;
   if(codes.length) mem.lastSymbols=codes;
@@ -288,34 +304,37 @@ async function buildRuleReply(job,state,now,market) {
     mem.profiles[codes[0]]=profile;
   }
   let body='',kind=null;
-  if(intent==='greeting') body='Buradayım hocam hisseyi veya merak ettiğin konuyu yazabilirsin';
+  if(intent==='greeting') body='Merhaba hisseyi veya değerlendirmemi istediğiniz konuyu yazabilirsiniz';
   else if(intent==='concept') body=route.concept;
   else if(intent==='unclear' || route.confidence<=0.5) {
     const suggestion=intent==='unclear'?null:intent;
-    body=suggestion?`${INTENTS[suggestion].label} mı soruyorsun hocam`:'Alım ekleme çıkış veya hangi konuyu sorduğunu biraz daha açık yazar mısın hocam';
+    body=suggestion?`${INTENTS[suggestion].label} değerlendirmemi mi istersiniz`:codes.length?`${codes.join(' ')} için işlem planınızı mı yoksa destek direnç seviyelerini mi değerlendirelim`:'Hangi hisseyi değerlendirmemi istersiniz';
     mem.waiting={kind:'intent',suggestion,phrase:route.key,intent:suggestion};
-  } else if(!codes.length) {body='Hangi hisse için soruyorsun hocam';kind='stock';}
+  } else if(!codes.length) {body='Hangi hisseyi değerlendirmemi istersiniz';kind='stock';}
   else if(details.closed) body='Pozisyonu kapattığını not ettim mevcut maliyet ve lot bilgisini temizledim';
-  else if(['buy','add','exit','hold'].includes(intent) && !profile.horizon) {
-    body=['add','exit'].includes(intent) && !profile.cost?'Maliyetin kaç ve kısa vade mi düşünüyorsun':'Kısa vade mi düşünüyorsun yoksa daha uzun süre bekleyebilir misin';kind='position';
-  } else if(['add','exit'].includes(intent) && !profile.cost) {body='Mevcut maliyetin kaç hocam';kind='position';}
-  else if(['profit','average'].includes(intent) && (!profile.cost || !profile.quantity)) {body='Mevcut maliyetini ve lot miktarını yazar mısın';kind='position';}
-  else if(intent==='average' && (!profile.plannedQuantity || !profile.plannedPrice)) {body='Kaç lot eklemeyi ve hangi fiyattan almayı düşünüyorsun';kind='plan';}
+  else if(['add','exit'].includes(intent) && !profile.cost) {body=`${codes[0]} maliyetiniz nedir`;kind='position';}
+  else if(['profit','average'].includes(intent) && (!profile.cost || !profile.quantity)) {body=profile.cost?`${codes[0]} için kaç lotunuz bulunuyor`:`${codes[0]} maliyetiniz ve lot miktarınız nedir`;kind='position';}
+  else if(intent==='average' && (!profile.plannedQuantity || !profile.plannedPrice)) {body='Kaç lot eklemeyi ve hangi fiyattan almayı düşünüyorsunuz';kind='plan';}
   if(kind) mem.waiting={kind,intent};
   else if(intent!=='unclear' && route.confidence>0.5) delete mem.waiting;
   const facts=[];
   if(!['greeting','concept','unclear'].includes(intent) && route.confidence>0.5) {
-    for(const code of codes) {
+    await Promise.all(codes.map(async code=>{
       let data=null;try {data=await market(code);} catch {console.log('Piyasa verisi alinamadi',code);}
       const p=mem.profiles[code] || {};
       const calc=calculations(p,data && !data.stale?data:{},{addQuantity:p.plannedQuantity,addPrice:p.plannedPrice});
-      facts.push({code,market:data,profile:p,calc});
-    }
+      return {code,market:data,profile:p,calc};
+    })).then(items=>facts.push(...items));
   }
   if(!body) body=personalizedReply(intent,facts,profile);
+  body=body.replace(/\bhocam\b/gi,'').replace(/maliyetin\b/g,'maliyetiniz').replace(/maliyetini\b/g,'maliyetinizi')
+    .replace(/tercihin\b/g,'tercihiniz').replace(/pozisyonunda\b/g,'pozisyonunuzda')
+    .replace(/bilgisini temizledim/g,'bilgilerini temizledim').replace(/kapattığını/g,'kapattığınızı')
+    .replace(/[^\S\n]+/g,' ').trim();
   const header=facts.filter(f=>f.market && !f.market.stale).map(f=>`${f.code} ${money(f.market.price)}`).join('   ');
   const text=[header,body].filter(Boolean).join('\n');
   mem.updatedAt=now();
+  if(!['unclear','greeting','concept'].includes(intent)) mem.lastIntent=intent;
   mem.history=[...mem.history,{role:'user',text:job.text},{role:'assistant',text}].slice(-HISTORY_LIMIT);
   return {text,mem};
 }
@@ -325,85 +344,156 @@ function memoryFor(state,key,now) {
   if(old && now-old.updatedAt<=TTL) return old;
   return {updatedAt:now,lastSymbols:[],profiles:{},history:[]};
 }
-function createEngine(store,{now=Date.now,market=marketData,send,botId,botUsername=''}={}) {
+function createEngine(store,{now=Date.now,market=marketData,send,botId,botUsername='',random=Math.random,maxConcurrent=8}={}) {
   const state=store.state;
-  let busy=false,closing=false;
+  state.sentAnswers=state.sentAnswers || {};
+  state.replyContexts=state.replyContexts || {};
+  state.recentInputs=state.recentInputs || {};
+  if(state.dialogueVersion!==32) {
+    const rebuilt=[];
+    for(const old of state.jobs) {
+      const job={...old,texts:old.texts || [old.text]};
+      delete job.answer;delete job.memory;delete job.preparedAt;
+      job.notBefore=now()+30000;job.deadline=now()+MINUTE;job.quote=job.quote || job.text.slice(0,120);
+      if(rebuilt.some(j=>j.key===job.key && (j.messageId===job.messageId || normalize(j.text)===normalize(job.text)))) continue;
+      const previous=[...rebuilt].reverse().find(j=>j.key===job.key);
+      const direct=extractCodes(job.text,new Set(state.symbols));
+      const priorCodes=previous?extractCodes(previous.text,new Set(state.symbols)):[];
+      const details=extractDetails(job.text,state.memories[job.key]?.waiting);
+      const intent=findIntent(job.text,direct).intent;
+      const hasDetails=Object.keys(details).some(k=>k!=='closed');
+      if(previous && hasDetails && ['unclear','outlook','hold'].includes(intent) && (!direct.length || direct.every(c=>priorCodes.includes(c)))) {
+        previous.texts.push(...job.texts);previous.text=previous.texts.join('\n');previous.messageId=job.messageId;previous.quote=job.quote;
+      } else rebuilt.push(job);
+    }
+    state.jobs=rebuilt;state.dialogueVersion=32;store.save();
+  }
+  const active=new Set(),activeUsers=new Set();
+  let closing=false;
   const keyFor=m=>`${m.chat.id}:${m.message_thread_id || 0}:${m.from?.id || m.sender_chat?.id}`;
-  function eligible(message) {
-    if(!message?.text || message.from?.is_bot || message.text.startsWith('/')) return false;
-    if(message.chat.type==='private') return true;
-    if(message.chat.username?.toLowerCase()!==GROUP && String(message.chat.id)!==String(state.groupId)) return false;
-    if(extractCodes(message.text,new Set(state.symbols)).length) return true;
-    if(String(message.reply_to_message?.from?.id)===String(botId)) return true;
-    const lower=message.text.toLocaleLowerCase('tr-TR');
-    if((botUsername && lower.includes('@'+botUsername.toLowerCase())) || /\bhocam\b|\bhoca\b|\bbot\b/u.test(lower)) return true;
-    const key=keyFor(message),mem=state.memories[key];
+  function eligible(m) {
+    if(!m?.text || m.from?.is_bot || m.text.startsWith('/')) return false;
+    if(m.chat.type==='private') return true;
+    if(m.chat.username?.toLowerCase()!==GROUP && String(m.chat.id)!==String(state.groupId)) return false;
+    if(extractCodes(m.text,new Set(state.symbols)).length) return true;
+    if(String(m.reply_to_message?.from?.id)===String(botId)) return true;
+    const t=normalize(m.text);
+    if((botUsername && m.text.toLowerCase().includes('@'+botUsername.toLowerCase())) || /\bhocam\b|\bhoca\b|\bbot\b/.test(t)) return true;
+    const key=keyFor(m),mem=state.memories[key];
     return Boolean((mem && now()-mem.updatedAt<15*MINUTE) || state.jobs.some(j=>j.key===key && now()-j.createdAt<15*MINUTE));
   }
-  function forget(message) {
-    const key=keyFor(message);
-    delete state.memories[key];
+  function forget(m) {
+    const key=keyFor(m);delete state.memories[key];delete state.recentInputs[key];
     state.jobs=state.jobs.filter(j=>j.key!==key);
-    state.revisions[key]=(state.revisions[key] || 0)+1;
-    store.save();
+    for(const [id,c] of Object.entries(state.replyContexts)) if(c.owner===key) delete state.replyContexts[id];
+    state.revisions[key]=(state.revisions[key] || 0)+1;store.save();
   }
   function ingest(update) {
     if(update.update_id<state.offset) return;
     const m=update.message;
-    if(eligible(m) && !state.jobs.some(j=>j.updateId===update.update_id)) {
-      const key=keyFor(m);
-      const waiting=state.jobs.filter(j=>j.key===key).length;
-      if(waiting>=20 || state.jobs.length>=1000) throw new Error('Kalici soru kuyrugu dolu');
-      state.jobs.push({id:crypto.randomUUID(),updateId:update.update_id,key,chatId:m.chat.id,threadId:m.message_thread_id,
-        messageId:m.message_id,text:m.text.slice(0,4000),createdAt:now(),notBefore:now()+MINUTE,attempts:0,revision:state.revisions[key] || 0});
+    if(eligible(m)) {
+      const key=keyFor(m),messageKey=`${m.chat.id}:${m.message_id}`;
+      const normalized=normalize(m.text),recent=state.recentInputs[key];
+      const duplicate=state.sentAnswers[messageKey] || state.jobs.some(j=>j.key===key && (j.texts || [j.text]).some(t=>normalize(t)===normalized))
+        || (recent && recent.text===normalized && now()-recent.at<90000);
+      if(!duplicate) {
+        const replyId=m.reply_to_message?.message_id;
+        let context=replyId?state.replyContexts[`${m.chat.id}:${replyId}`]:null;
+        if(!context && String(m.reply_to_message?.from?.id)===String(botId)) {
+          const q=m.reply_to_message.text || '';
+          const codes=extractCodes(q,new Set(state.symbols));
+          const own=memoryFor(state,key,now());
+          // Eski surumun bot sorularina verilen cevaplari da okuyabilir
+          if(codes.length) context={owner:key,codes,intent:own.lastIntent || own.waiting?.intent || 'add',
+            waiting:/maliyet/i.test(q)?{kind:'position',intent:own.lastIntent || own.waiting?.intent || 'add'}:null};
+        }
+        const pending=[...state.jobs].reverse().find(j=>j.key===key && !active.has(j.id));
+        const details=extractDetails(m.text,state.memories[key]?.waiting || context?.waiting);
+        const supplied=Object.keys(details).some(k=>k!=='closed');
+        const direct=extractCodes(m.text,new Set(state.symbols));
+        const pendingCodes=pending?extractCodes(pending.text,new Set(state.symbols)):[];
+        const sameStock=!direct.length || !pendingCodes.length || direct.every(c=>pendingCodes.includes(c));
+        const currentIntent=findIntent(m.text,direct).intent;
+        const pendingIntent=pending?findIntent(pending.text,pendingCodes).intent:'unclear';
+        const continuation=supplied && (['unclear','outlook'].includes(currentIntent) || currentIntent===pendingIntent || (currentIntent==='hold' && /beklerim/.test(normalize(m.text))));
+        if(pending && continuation && sameStock && now()-pending.createdAt<MINUTE) {
+          pending.texts=[...(pending.texts || [pending.text]),m.text.slice(0,4000)];
+          pending.text=pending.texts.join('\n');pending.messageId=m.message_id;pending.quote=m.text.slice(0,120);
+          if(context) pending.context=context;
+          delete pending.answer;delete pending.memory;
+        } else {
+          if(state.jobs.filter(j=>j.key===key).length>=20 || state.jobs.length>=1000) throw new Error('Soru kuyrugu dolu');
+          // 30 ile 45 sn arasinda basla fiyat sorgusu icin de zaman birak
+          const delay=30000+Math.min(15000,Math.floor(Math.max(0,Math.min(1,random()))*15001));
+          state.jobs.push({id:crypto.randomUUID(),updateId:update.update_id,key,chatId:m.chat.id,threadId:m.message_thread_id,
+            messageId:m.message_id,quote:m.text.slice(0,120),text:m.text.slice(0,4000),texts:[m.text.slice(0,4000)],context,
+            createdAt:now(),notBefore:now()+delay,deadline:now()+MINUTE,attempts:0,revision:state.revisions[key] || 0});
+        }
+        state.recentInputs[key]={text:normalized,at:now()};
+      }
     }
     state.offset=update.update_id+1;store.save();
   }
-  async function build(job) { return buildRuleReply(job,state,now,market); }
-  async function tick() {
-    if(busy || closing) return;
-    const seen=new Set();
-    const job=state.jobs.find(j=>{
-      const id=String(j.chatId);if(seen.has(id)) return false;seen.add(id);
-      return now()>=Math.max(j.notBefore,(state.lastReply[id] || 0)+MINUTE);
-    });
-    if(!job) return;
-    busy=true;
+  async function processJob(job) {
+    active.add(job.id);activeUsers.add(job.key);
     try {
-      if(job.revision!==(state.revisions[job.key] || 0)) {state.jobs=state.jobs.filter(j=>j.id!==job.id);store.save();return;}
-      // Telegram gonderim hatasinda pahali AI cevabini tekrar uretme
-      // Bir dakikadan eski hazir cevap varsa guncel veriden yeniden olustur
-      if(job.answer && now()-(job.preparedAt || 0)>MINUTE) {delete job.answer;delete job.memory;}
+      const messageKey=`${job.chatId}:${job.messageId}`;
+      if(state.sentAnswers[messageKey] || job.revision!==(state.revisions[job.key] || 0)) {
+        state.jobs=state.jobs.filter(j=>j.id!==job.id);store.save();return;
+      }
+      if(job.answer && now()-(job.preparedAt || 0)>30000) {delete job.answer;delete job.memory;}
       if(!job.answer) {
-        const result=await build(job);
+        const result=await buildRuleReply(job,state,now,market);
         if(closing || job.revision!==(state.revisions[job.key] || 0)) return;
         job.answer=result.text;job.memory=result.mem;job.preparedAt=now();store.save();
       }
       if(closing) return;
-      await send('sendMessage',{chat_id:job.chatId,text:job.answer,message_thread_id:job.threadId,
-        reply_parameters:{message_id:job.messageId,allow_sending_without_reply:true}});
+      const params={message_id:job.messageId,allow_sending_without_reply:false};
+      if(job.quote) {params.quote=job.quote;params.quote_position=0;}
+      let result;
+      try {
+        result=await send('sendMessage',{chat_id:job.chatId,text:job.answer,message_thread_id:job.threadId,reply_parameters:params});
+      } catch(e) {
+        if(e.code!==400 || !/quote/i.test(e.message)) throw e;
+        delete params.quote;delete params.quote_position;
+        result=await send('sendMessage',{chat_id:job.chatId,text:job.answer,message_thread_id:job.threadId,reply_parameters:params});
+      }
       if(job.revision===(state.revisions[job.key] || 0)) state.memories[job.key]=job.memory;
-      state.lastReply[String(job.chatId)]=now();
-      state.jobs=state.jobs.filter(j=>j.id!==job.id);store.save();
+      state.sentAnswers[messageKey]={at:now(),botMessageId:result?.message_id};
+      if(result?.message_id) state.replyContexts[`${job.chatId}:${result.message_id}`]={owner:job.key,codes:job.memory.lastSymbols,
+        intent:job.memory.lastIntent,waiting:job.memory.waiting || null,at:now()};
+      state.lastReply[String(job.chatId)]=now();state.jobs=state.jobs.filter(j=>j.id!==job.id);store.save();
     } catch(e) {
       if(e.storage) throw e;
       console.error('Yanit islemi hatasi',e.message);
-      if(e.code===403 || (e.code===400 && /chat not found|CHAT_ID_INVALID/i.test(e.message))) {
+      if(e.code===403 || (e.code===400 && /chat not found|CHAT_ID_INVALID|message to be replied|REPLY_MESSAGE_NOT_FOUND/i.test(e.message))) {
         state.failures.push({id:job.id,chatId:job.chatId,reason:e.message,at:now()});state.failures=state.failures.slice(-50);
         state.jobs=state.jobs.filter(j=>j.id!==job.id);
-      } else {
-        job.attempts++;
-        job.notBefore=now()+Math.max(Number(e.wait || 0)*1000,Math.min(900000,MINUTE*2**Math.min(job.attempts-1,4)));
-      }
+      } else {job.attempts++;job.notBefore=now()+Math.max(Number(e.wait || 0)*1000,Math.min(900000,30000*2**Math.min(job.attempts-1,5)));}
       store.save();
-    } finally {busy=false;}
+    } finally {active.delete(job.id);activeUsers.delete(job.key);}
+  }
+  async function tick() {
+    if(closing) return;
+    const seen=new Set(),tasks=[];
+    for(const job of state.jobs) {
+      if(active.size>=maxConcurrent) break;
+      if(seen.has(job.key)) continue;seen.add(job.key);
+      if(activeUsers.has(job.key) || now()<job.notBefore) continue;
+      tasks.push(processJob(job));
+    }
+    await Promise.all(tasks);
   }
   function cleanup() {
     for(const [key,mem] of Object.entries(state.memories)) if(now()-mem.updatedAt>TTL && !state.jobs.some(j=>j.key===key)) delete state.memories[key];
+    for(const [key,item] of Object.entries(state.sentAnswers)) if(now()-item.at>7*86400000) delete state.sentAnswers[key];
+    for(const [key,item] of Object.entries(state.replyContexts)) if(now()-item.at>7*86400000) delete state.replyContexts[key];
+    for(const [key,item] of Object.entries(state.recentInputs)) if(now()-item.at>MINUTE*15) delete state.recentInputs[key];
     store.save();
   }
-  return {ingest,tick,forget,cleanup,keyFor,build,close(){closing=true;},isBusy:()=>busy};
+  return {ingest,tick,forget,cleanup,keyFor,build:job=>buildRuleReply(job,state,now,market),close(){closing=true;},isBusy:()=>active.size>0};
 }
+
 async function telegram(method, body) {
   const response = await fetch(
     'https://api.telegram.org/bot' + BOT_TOKEN + '/' + method,
@@ -424,7 +514,7 @@ async function telegram(method, body) {
   return result.result;
 }
 async function main() {
-  console.log('BIST BOT 3.0.1 TEMIZ SURUM');
+  console.log('BIST BOT 3.2.0 SOHBET DUZELTMESI');
   if(!BOT_TOKEN || BOT_TOKEN==='BURAYA_BOT_TOKENINI_YAZ') throw new Error('server.js basindaki BOT_TOKEN alanina tokenini yaz');
   const store=createStore(process.env.DATA_DIR || './data');
   const state=store.state;
@@ -464,10 +554,10 @@ async function main() {
         const command=m?.text?.trim().split(/\s/)[0].split('@')[0].toLowerCase();
         if(allowed && !m.from?.is_bot && ['/start','/help','/durum','/unut'].includes(command)) {
           if(command==='/unut') engine.forget(m);
-          const text=command==='/unut'?'Bu sohbetteki hafızanı ve bekleyen sorularını sildim':command==='/durum'?
-            `${state.symbols.length} hisse tanımlı\nBekleyen soru ${state.jobs.length}\nYanıt aralığı bir dakika\nFiyat kaynağı gecikmeli olabilir`:
-            'Hisseyi veya borsa sorunu yaz hocam diyerek de sorabilirsin\nYanıtlar bir dakika arayla gelir\nGeniş kelime eşleştirme ve konuşma hafızası kullanırım hafızanı /unut ile silebilirsin';
-          await telegram('sendMessage',{chat_id:m.chat.id,text,message_thread_id:m.message_thread_id});
+          const text=command==='/unut'?'Bu sohbetteki hafızanızı ve bekleyen sorularınızı sildim':command==='/durum'?
+            `${state.symbols.length} hisse tanımlı\nBekleyen soru ${state.jobs.length}\nYanıt beklemesi otuz ile altmış saniye\nFiyat kaynağı gecikmeli olabilir`:
+            'Hisseyi veya borsa sorunuzu yazabilirsiniz\nSorularınız ayrı ayrı değerlendirilir\nGeniş kelime eşleştirme ve konuşma hafızası kullanırım hafızanızı /unut ile silebilirsiniz';
+          await telegram('sendMessage',{chat_id:m.chat.id,text,message_thread_id:m.message_thread_id,reply_parameters:{message_id:m.message_id,allow_sending_without_reply:false}});
         }
         engine.ingest(update);
       }
