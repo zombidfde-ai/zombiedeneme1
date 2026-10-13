@@ -1,6 +1,6 @@
 {
-  "name": "bist-yorum-botu",
-  "version": "1.0.0",
+  "name": "bist-sohbet-botu",
+  "version": "3.0.0",
   "private": true,
   "scripts": {
     "start": "node server.js",
