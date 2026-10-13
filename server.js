@@ -102,7 +102,9 @@ function literalNumbers(text) {
 function normalize(text) {
   return String(text).normalize('NFKC').toLocaleLowerCase('tr-TR')
     .replace(/ı/g,'i').replace(/ş/g,'s').replace(/ğ/g,'g').replace(/ü/g,'u').replace(/ö/g,'o').replace(/ç/g,'c')
-    .replace(/[\u200B-\u200D\uFEFF]/g,'').replace(/[^a-z0-9.,\s]/g,' ').replace(/\s+/g,' ').trim();
+    .replace(/[\u200B-\u200D\uFEFF]/g,'').replace(/[^a-z0-9.,\s]/g,' ').replace(/\s+/g,' ').trim()
+    .replace(/\bnol[au]cak\b/g,'ne olacak').replace(/\bnapalim\b/g,'ne yapalim')
+    .replace(/\bnapcaz\b/g,'ne yapacagiz').replace(/\bnezaman\b/g,'ne zaman');
 }
 function distance(a,b) {
   if(a.length===b.length) {
@@ -139,9 +141,15 @@ const INTENTS={
   compare:{label:'hisseleri karşılaştırmayı',tests:[[/karsilastir|hangisi|kiyas|daha iyi|mi yoksa|mu yoksa/,9]]},
   news:{label:'hareketin nedenini veya haberleri',tests:[[/neden|niye|sebep|haber|kap aciklama|bilanco nasil/,8]]},
   risk:{label:'riski değerlendirmeyi',tests:[[/risk|guvenli|tehlike|oynak|volatil|kredili|kaldirac|butun param|tum param|tek hisse/,8]]},
-  outlook:{label:'genel görünümü',tests:[[/yorum|nasil|ne dusun|ne dersin|ne diyorsun|ne alemde|ne tarafta|yon|beklenti|toparlar|yuksel|duser|dusuyor|durum|ne olur|ne olacak|gidecek|hareket|gorunum/,4]]}
+  outlook:{label:'genel görünümü',tests:[[/yorum|nasil|ne dusun|ne dersin|ne diyorsun|ne alemde|ne tarafta|yon|beklenti|toparlar|toparlan|baski|dusus|erime|satis baskisi|donus|yuksel|duser|dusuyor|durum|ne olur|ne olacak|gidecek|hareket|gorunum/,4]]}
 };
 const CONCEPTS=[
+  ['satis baskisi','Satış baskısı satış isteğinin alış talebinden daha güçlü olduğu görünümü anlatır\nTek bir sebebe bağlamak için haber ve işlem verisi gerekir'],
+  ['volatilite','Volatilite fiyatların ne kadar sert dalgalandığını anlatır\nYüksek oynaklık hem kazanç hem kayıp ihtimalinin büyüdüğünü gösterir'],
+  ['likidite','Likidite bir varlığın fiyatı fazla etkilemeden alınıp satılabilmesidir\nAlıcı satıcı azaldığında işlem maliyeti ve fiyat kayması artabilir'],
+  ['endeks','Endeks belirli hisselerin ortak hareketini ölçen bir göstergedir\nEndeks yükselirken bütün hisselerin yükselmesi gerekmez'],
+  ['borsa','Borsada şirket payları ve diğer sermaye piyasası araçları alınıp satılır\nFiyatlar beklenti talep ve şirket verileriyle değişebilir'],
+  ['trend','Trend fiyatın belirli bir dönemdeki genel yönüdür\nKısa vadeli bir hareket tek başına trend değişimi sayılmaz'],
   ['rsi','RSI fiyatın yükseliş ve düşüş hızını ölçen bir göstergedir\nTek başına alım satım kararı verdirmez'],
   ['destek','Destek satışların karşılanabildiği fiyat bölgesidir\nAltında kalıcılık baskının arttığını gösterebilir'],
   ['direnc','Direnç yükselişin zorlanabildiği fiyat bölgesidir\nÜzerinde kalıcılık güçlenme işareti olabilir'],
@@ -160,7 +168,7 @@ function findIntent(text,codes=[]) {
   const t=correct(text);
   if(codes.length>=2 && /\b(mi|mu|hangisi|yoksa)\b/.test(t)) return {intent:'compare',confidence:1};
   const scored=Object.entries(INTENTS).map(([intent,rule])=>({intent,score:rule.tests.reduce((n,[r,s])=>n+(r.test(t)?s:0),0)})).sort((a,b)=>b.score-a.score);
-  if(!scored[0].score) return {intent:'unclear',confidence:0};
+  if(!scored[0].score) return /umut|duzel|bu is|buralardan|hep eksi|nereye kadar|biter|bitecek|bitmez|satiyor/.test(t)?{intent:'outlook',confidence:0.8}:{intent:'unclear',confidence:0};
   if(scored[0].intent==='average') return {intent:'average',confidence:1};
   if(scored[0].score===scored[1].score) return {intent:scored[0].intent,confidence:0.5};
   return {intent:scored[0].intent,confidence:0.9};
@@ -177,8 +185,13 @@ function extractDetails(text,waiting) {
   match=t.match(/(\d[\d.,]*)\s*(?:tl|lira)(?:dan|den)?/) || t.match(/(\d[\d.,]*)(?:dan|den)\s*(?:al|ekle)/);
   if(match && (newOrder || waiting?.kind==='plan')) p.addPrice=parseAmount(match[1]);
   if(!p.cost && waiting?.kind==='position') {
-    const first=t.match(/^(\d[\d.,]*)\s*(?:tl|lira|maliyet|ve|lot|\s|$)/);
-    if(first) p.cost=parseAmount(first[1]);
+    const first=t.match(/^(\d[\d.,]*)(?:\s*(?:tl|lira|hocam))?\s*$/);
+    if(first) {
+      const value=parseAmount(first[1]);
+      const fields=waiting.fields || ['cost'];
+      if(fields[0]==='quantity' && Number.isInteger(value)) p.quantity=value;
+      else if(fields[0]==='cost') p.cost=value;
+    }
   }
   if(waiting?.kind==='plan' && p.quantity) {p.addQuantity=p.quantity;delete p.quantity;}
   if(waiting?.kind==='plan' && !p.addQuantity && /^\d[\d.,]*$/.test(t)) p.addQuantity=parseAmount(t);
@@ -212,6 +225,7 @@ function resolve(text,mem,symbols) {
   } else if(mem.aliases?.[key]) result={intent:mem.aliases[key],confidence:1};
   else if(waiting?.kind==='intent' && result.intent!=='unclear' && result.confidence>0.5) learned=true;
   const supplied=Object.keys(details).some(k=>k!=='closed');
+  if(waiting?.kind==='position' && supplied && waiting.intent && !explicit.length) result={intent:waiting.intent,confidence:1};
   if(waiting && waiting.kind!=='intent' && (supplied || details.closed || (explicit.length && waiting.kind==='stock'))) {
     if(result.intent==='unclear' || result.intent==='outlook' || (result.intent==='hold' && /\bbeklerim\b/.test(t)) || (waiting.intent==='average' && result.intent==='add')) result={intent:waiting.intent,confidence:1};
   }
@@ -225,7 +239,7 @@ function resolve(text,mem,symbols) {
     mem.aliases[waiting.phrase]=result.intent;
     const keys=Object.keys(mem.aliases);if(keys.length>100) delete mem.aliases[keys[0]];
   }
-  if(result.intent==='unclear' && explicit.length && phraseKey(text,explicit)==='') result={intent:'outlook',confidence:1};
+  if(codes.length && (result.intent==='unclear' || result.confidence<=0.5)) result={intent:'outlook',confidence:1};
   if(details.closed && codes.length) result={intent:'hold',confidence:1};
   if(explicit.length>1) {delete details.cost;delete details.quantity;delete details.addPrice;delete details.addQuantity;details.closed=false;}
   return {...result,codes,details,key};
@@ -278,6 +292,124 @@ function personalizedReply(intent,facts,profile) {
   if(longer && ['buy','add','hold','exit'].includes(intent)) second='Uzun vadeli karar için bilanço ve nakit akışı da gerekir günlük teknik veri tek başına yeterli değil';
   return first+'\n'+second;
 }
+function marketTopic(text) {
+  const t=normalize(text);
+  if(/haber|neden|niye|sebep|faiz|enflasyon|dolar|yabanci|savas|siyasi|politika|secim/.test(t)) return 'news';
+  if(/ne zaman|kac gun|kac hafta|ne kadar sur|ne vakit|sure|yarin|haftaya|bugun biter/.test(t)) return 'timing';
+  if(/panik|kork|bikt|mahvol|batt|moral|bunald|tukend|endise|dayanam/.test(t)) return 'panic';
+  if(/destek|direnc|seviye|hedef|nereye|kaca/.test(t)) return 'levels';
+  if(/hacim|hacm|para giris|para cikis|islem miktar/.test(t)) return 'volume';
+  if(/satay|satal|cikay|cikal|kacalim|nakde|nakit|azalt|kurtul/.test(t)) return 'exit';
+  if(/alinir|\balay|\balal|alinabilir|girey|girelim|girilir|giris|\balim\b|firsat|\bekle|toplay/.test(t)) return 'entry';
+  if(/bekle|tutay|tasiy|sabir|sabred/.test(t)) return 'wait';
+  if(/risk|guven|kredili|borc|kaldirac|tum para|butun para/.test(t)) return 'risk';
+  if(/toparlan|tepki|donus|duzel|yuksel|yesil|ralli|rahatla|umut|donmez|dibi bul/.test(t)) return 'recovery';
+  if(/baski|dusus|satis|satiyor|cokus|erime|kirmizi|dusuyor|dusmeye|geri cekil|sark|hep eksi/.test(t)) return 'pressure';
+  if(/yatay|sikis|kararsiz|hareketsiz|gitmiyor|yerinde/.test(t)) return 'sideways';
+  return 'outlook';
+}
+function marketScope(text,mem,symbols,at=Date.now()) {
+  const t=normalize(text),stockCodes=extractCodes(text,symbols);
+  const recent=!Number.isFinite(mem.updatedAt) || at-mem.updatedAt<30*MINUTE;
+  const index=/\bxu030\b|\bbist\s*30\b/.test(t)?'XU030':/\bxu100\b|\bbist\s*100\b/.test(t)?'XU100':null;
+  const explicitMarket=Boolean(index || /\bpiyasa|\bborsa|\bendeks|\bbist\b|\bgenel durum\b|\bgenel gorunum\b|\bpiyasanin geneli\b/.test(t));
+  const generic=/baski|dusus|satis|satiyor|toparlan|tepki|panik|kork|endise|erime|ne olacak|nasil olacak|ne olur|ne diyorsun|ne dersin|bu is|boyle|biter|bitecek|bitmez|nereye|kurtulur|duzel|moral|ne yapalim|ne yapacagiz|ne yapmali|bekleyelim|donus|sark|yuksel|umut|donmez|dibi bul|hep eksi/.test(t);
+  if(stockCodes.length) return null;
+  if(CONCEPTS.some(([word])=>t.includes(word)) && /nedir|ne demek|nasil hesap|ne ise|acikla/.test(t)) return null;
+  if(explicitMarket || (mem.waiting?.kind==='scope' && /^(genel|geneli|piyasa|borsa|endeks)$/.test(t))) {
+    return {scope:'market',index:index || (recent?mem.focus?.index:null) || 'XU100',topic:marketTopic(text)};
+  }
+  // Maliyet ve lot devam mesaji piyasa yorumuna donusturulmez
+  const detail=extractDetails(text,mem.waiting);
+  if(Object.keys(detail).some(k=>k!=='closed')) return mem.focus?.type==='market'?{scope:'stock-needed'}:null;
+  if(recent && mem.focus?.type==='market' && !/^(merhaba|selam|tesekkur|sag ol|eyvallah)/.test(t)) {
+    if(/maliyet|lotum|zararim|karim|ortalamam/.test(t)) return {scope:'stock-needed'};
+    if(generic || findIntent(text,[]).intent!=='unclear' || /^(evet|aynen|peki|tamam)$/.test(t)) return {scope:'market',index:mem.focus.index || 'XU100',topic:marketTopic(text)};
+  }
+  if((!recent || (!mem.lastSymbols?.length && mem.focus?.type!=='stock')) && /baski|dusus|satislar|satiyor|cokus|panik|toparlan|ralli|hep eksi/.test(t)) return {scope:'market',index:'XU100',topic:marketTopic(text)};
+  if(generic && (!recent || (!mem.lastSymbols?.length && mem.focus?.type!=='stock'))) return {scope:'context'};
+  return null;
+}
+const indexNumber=n=>n.toLocaleString('tr-TR',{minimumFractionDigits:2,maximumFractionDigits:2})+' puan';
+async function buildMarketReply(job,mem,scope,now,market) {
+  let text;
+  if(scope.scope==='context') {
+    text='Genel piyasayı mı yoksa belirli bir hisseyi mi değerlendiriyorsunuz';
+    mem.waiting={kind:'scope'};
+  } else if(scope.scope==='stock-needed') {
+    text='Maliyet ve pozisyon değerlendirmesi için hangi hisseyi konuştuğumuzu belirtir misiniz';
+    const details=extractDetails(job.text,mem.waiting);
+    delete details.closed;
+    if(Object.keys(details).length) mem.pendingPosition=details;
+    mem.waiting={kind:'stock',intent:'outlook'};
+  } else {
+    const index=scope.index,label=index==='XU030'?'BIST 30':'BIST 100';
+    let data=null;try {data=await market(index);} catch {console.log('Endeks verisi alinamadi',index);}
+    const topic=scope.topic,t=data?.technical;
+    const valid=data && !data.stale && Number.isFinite(data.price);
+    const s=t?.support?indexNumber(t.support):null,r=t?.resistance?indexNumber(t.resistance):null;
+    const negative=t?.direction==='negatif',positive=t?.direction==='pozitif';
+    let first='',second='';
+    if(topic==='news') {
+      first='Haber ve makro veri akışı bağlı olmadığı için hareketin nedenini doğrulayamıyorum';
+      second=valid && t?negative?'Endeksin günlük görünümünde satış baskısı sürüyor':positive?'Endeksin günlük görünümü pozitif ancak bu durum haberin nedenini açıklamaz':'Endeksin günlük görünümü kararsız':'Güncel endeks verisi de doğrulanamadı';
+    } else if(!valid) {
+      first='Güncel endeks verisi doğrulanamadı bu nedenle piyasanın şu anki yönünü söyleyemiyorum';
+      second='Genel olarak toparlanma için fiyatların istikrar kazanması ve yükselişin birkaç seans sürmesi izlenir';
+    } else if(!t) {
+      first='Endeksin son değeri alındı ancak günlük teknik yorum için yeterli geçmiş yok';
+      second='Bu verilerle baskının bittiğini veya yeni yönü doğrulayamıyorum';
+    } else if(topic==='timing') {
+      first='Baskının biteceği veya toparlanmanın başlayacağı kesin günü bu verilerle hesaplayamam';
+      second=r?`${r} üzerinde kalıcılık toparlanma senaryosunu güçlendirebilir`:'Tek günlük tepki yerine birkaç seans devam eden güçlenme izlenmeli';
+    } else if(topic==='panic') {
+      first='Sert hareketlerde acele karar yerine taşıyabileceğiniz riski ve pozisyon büyüklüğünü gözden geçirmek daha sağlıklı';
+      second=negative && s?`${s} desteği kaybedilirse baskı artabilir`:'Tek günlük hareketi kesin dönüş veya kesin çöküş olarak değerlendirmemek gerekir';
+    } else if(topic==='risk') {
+      first='Borçla işlem yapmak ve tek hisseye yoğunlaşmak dalgalı piyasada kayıp riskini büyütür';
+      second='Endeksin yönü tek başına portföyünüzdeki her hissenin riskini açıklamaz';
+    } else if(topic==='volume') {
+      const v=data.volume,avg=t.averageVolume;
+      if(Number.isFinite(v) && v>0 && avg>0) {
+        first=v>avg*1.5?'Sağlayıcının endeks hacmi son günlerin ortalamasının üzerinde':v<avg*0.7?'Sağlayıcının endeks hacmi son günlerin ortalamasının altında':'Sağlayıcının endeks hacmi son günlerin ortalamasına yakın';
+        second='Bu veri tüm hisselerde net para girişi veya çıkışı olduğunu göstermez';
+      } else {
+        first='Güvenilir endeks hacmi ve piyasa genelinde net para akışı verisi bu kaynakta yok';
+        second='Fiyat hareketinden tek başına para girişi ya da çıkışı sonucu çıkaramam';
+      }
+    } else if(topic==='levels') {
+      first=[s?`${s} destek`:null,r?`${r} direnç`:null].filter(Boolean).join('   ') || 'Son günlük verilerde net destek direnç seviyesi çıkarılamadı';
+      second='Bu bölgeler kesin dönüş noktaları değildir kalıcılık önemlidir';
+    } else if(topic==='entry') {
+      first=negative?'Genel piyasa yeni alım açısından henüz güçlü dönüş teyidi vermiyor':positive?'Endeksteki yükseliş alımları destekliyor ancak her hisse aynı gücü göstermeyebilir':'Piyasa kararsız yeni alımda yön teyidi beklemek daha temkinli';
+      second=s?`${s} altında kalıcılık alım senaryosunu zayıflatır`:'İşlem yapılacak hisseyi ayrıca değerlendirmek gerekir';
+    } else if(topic==='exit') {
+      first='Portföyün tamamından çıkış kararı yalnızca endekse bakılarak verilmemeli';
+      second=negative && s?`${s} kaybedilirse risk azaltma senaryosu güçlenir`:'Hisselerinizin görünümü vadeniz ve taşıyabileceğiniz kayıp birlikte değerlendirilmeli';
+    } else if(topic==='wait') {
+      first=negative?'Bekleme senaryosunda satış baskısının sürebileceğini hesaba katmak gerekiyor':positive?'Endeksin günlük yükselişi korunuyor ancak bu durum her hisse için bekleme gerekçesi değildir':'Endeks kararsız beklerken kararınızı değiştirecek koşulu önceden belirlemek önemli';
+      second=s?`${s} altında kalıcılık bekleme senaryosunu zayıflatır`:'Hisse ve vade bilgisiyle daha somut değerlendirme yapılabilir';
+    } else if(topic==='recovery') {
+      first=positive?'Endekste günlük güçlenme var ancak tek yükseliş günü kalıcı toparlanma garantisi değildir':negative?'Tepki ihtimali olsa da günlük görünümde kalıcı dönüş teyidi henüz zayıf':'Toparlanma için günlük göstergelerin aynı yönde güçlenmesi gerekiyor';
+      second=r?`${r} üzerinde kalıcılık toparlanma senaryosunu destekleyebilir`:'Yükselişin birkaç seans devam etmesi daha anlamlı teyit olur';
+    } else if(topic==='pressure') {
+      first=negative?'Endeksin günlük görünümünde satış baskısı sürüyor tepki yükselişi baskının tamamen bittiği anlamına gelmez':positive?'Endeksin günlük görünümü pozitif gün içindeki baskı genel trendin bozulduğunu tek başına göstermez':'Endekste net yön yok satış baskısının bittiğini söylemek için teyit gerekiyor';
+      second=negative && s?`${s} kaybedilirse baskı artabilir`:r?`${r} üzerinde kalıcılık görünümü güçlendirebilir`:'Endeks görünümü bütün hisselerin aynı yönde hareket edeceğini göstermez';
+    } else if(topic==='sideways') {
+      first='Sıkışık görünümde yön belirlenmeden her kısa hareketi yeni trend saymak yanıltıcı olabilir';
+      second=s && r?`${s} ile ${r} arasındaki kalıcılık izlenebilir`:'Aralığın dışına taşan hareketin devam edip etmediği izlenmeli';
+    } else {
+      first=negative?'Endeksin günlük yönü negatif toparlanmanın kalıcı olduğuna dair teyit zayıf':positive?'Endeksin günlük yönü pozitif güçlenme devam ediyor':'Endeksin günlük görünümü kararsız yön henüz netleşmiş değil';
+      second=negative && s?`${s} desteği korunmazsa baskı artabilir`:r?`${r} üzerinde kalıcılık güçlenmeyi destekleyebilir`:'Tek günlük hareket yerine birkaç seanslık devamlılık izlenmeli';
+    }
+    text=[valid?`${label} ${indexNumber(data.price)}`:null,first,second].filter(Boolean).join('\n');
+    mem.focus={type:'market',index,topic:scope.topic};mem.lastIntent='market';delete mem.waiting;delete mem.pendingPosition;
+  }
+  mem.updatedAt=now();
+  mem.history=[...mem.history,{role:'user',text:job.text},{role:'assistant',text}].slice(-HISTORY_LIMIT);
+  return {text,mem};
+}
+
 async function buildRuleReply(job,state,now,market) {
   const mem=structuredClone(memoryFor(state,job.key,now()));
   // Yanıtlanan bot sorusundaki bağlam yalnızca aynı üyeye aitse kullanılır
@@ -291,9 +423,15 @@ async function buildRuleReply(job,state,now,market) {
       mem.lastIntent='outlook';delete mem.waiting;
     }
   }
+  if(job.context?.focus && (job.context.owner===job.key || job.context.focus.type==='market')) mem.focus=job.context.focus;
+  const scope=marketScope(job.text,mem,new Set(state.symbols),now());
+  if(scope) return buildMarketReply(job,mem,scope,now,market);
   const route=resolve(job.text,mem,new Set(state.symbols));
+  if(route.codes.length===1 && mem.pendingPosition && mem.waiting?.kind==='stock') {
+    route.details={...mem.pendingPosition,...route.details};delete mem.pendingPosition;
+  }
   const {intent,codes,details}=route;
-  if(codes.length) mem.lastSymbols=codes;
+  if(codes.length) {mem.lastSymbols=codes;mem.focus={type:'stock',codes};}
   let profile={};
   if(codes.length===1) {
     profile=mem.profiles[codes[0]] || {};
@@ -308,14 +446,18 @@ async function buildRuleReply(job,state,now,market) {
   else if(intent==='concept') body=route.concept;
   else if(intent==='unclear' || route.confidence<=0.5) {
     const suggestion=intent==='unclear'?null:intent;
-    body=suggestion?`${INTENTS[suggestion].label} değerlendirmemi mi istersiniz`:codes.length?`${codes.join(' ')} için işlem planınızı mı yoksa destek direnç seviyelerini mi değerlendirelim`:'Hangi hisseyi değerlendirmemi istersiniz';
+    body='Hangi hisseyi değerlendirmemi istersiniz';
     mem.waiting={kind:'intent',suggestion,phrase:route.key,intent:suggestion};
-  } else if(!codes.length) {body='Hangi hisseyi değerlendirmemi istersiniz';kind='stock';}
+  } else if(!codes.length) {
+    body='Hangi hisseyi değerlendirmemi istersiniz';kind='stock';
+    const pending={...details};delete pending.closed;
+    if(Object.keys(pending).length) mem.pendingPosition=pending;
+  }
   else if(details.closed) body='Pozisyonu kapattığını not ettim mevcut maliyet ve lot bilgisini temizledim';
-  else if(['add','exit'].includes(intent) && !profile.cost) {body=`${codes[0]} maliyetiniz nedir`;kind='position';}
-  else if(['profit','average'].includes(intent) && (!profile.cost || !profile.quantity)) {body=profile.cost?`${codes[0]} için kaç lotunuz bulunuyor`:`${codes[0]} maliyetiniz ve lot miktarınız nedir`;kind='position';}
+  else if(['add','exit'].includes(intent) && !profile.cost) {body='Mevcut maliyetiniz nedir';kind='position';}
+  else if(['profit','average'].includes(intent) && (!profile.cost || !profile.quantity)) {body=profile.cost?'Kaç lotunuz bulunuyor':'Mevcut maliyetiniz nedir';kind='position';}
   else if(intent==='average' && (!profile.plannedQuantity || !profile.plannedPrice)) {body='Kaç lot eklemeyi ve hangi fiyattan almayı düşünüyorsunuz';kind='plan';}
-  if(kind) mem.waiting={kind,intent};
+  if(kind) mem.waiting={kind,intent,...(kind==='position'?{fields:[profile.cost?'quantity':'cost']}: {})};
   else if(intent!=='unclear' && route.confidence>0.5) delete mem.waiting;
   const facts=[];
   if(!['greeting','concept','unclear'].includes(intent) && route.confidence>0.5) {
@@ -349,7 +491,13 @@ function createEngine(store,{now=Date.now,market=marketData,send,botId,botUserna
   state.sentAnswers=state.sentAnswers || {};
   state.replyContexts=state.replyContexts || {};
   state.recentInputs=state.recentInputs || {};
-  if(state.dialogueVersion!==32) {
+  if(state.dialogueVersion!==34) {
+    for(const mem of Object.values(state.memories)) {
+      if(mem.waiting?.kind==='position' && !mem.waiting.fields) {
+        const p=mem.profiles?.[mem.lastSymbols?.[0]] || {};
+        mem.waiting.fields=[p.cost && ['profit','average'].includes(mem.waiting.intent)?'quantity':'cost'];
+      }
+    }
     const rebuilt=[];
     for(const old of state.jobs) {
       const job={...old,texts:old.texts || [old.text]};
@@ -366,7 +514,7 @@ function createEngine(store,{now=Date.now,market=marketData,send,botId,botUserna
         previous.texts.push(...job.texts);previous.text=previous.texts.join('\n');previous.messageId=job.messageId;previous.quote=job.quote;
       } else rebuilt.push(job);
     }
-    state.jobs=rebuilt;state.dialogueVersion=32;store.save();
+    state.jobs=rebuilt;state.dialogueVersion=34;store.save();
   }
   const active=new Set(),activeUsers=new Set();
   let closing=false;
@@ -376,6 +524,7 @@ function createEngine(store,{now=Date.now,market=marketData,send,botId,botUserna
     if(m.chat.type==='private') return true;
     if(m.chat.username?.toLowerCase()!==GROUP && String(m.chat.id)!==String(state.groupId)) return false;
     if(extractCodes(m.text,new Set(state.symbols)).length) return true;
+    if(/\bpiyasa|\bborsa|\bendeks|\bbist|\bxu100\b|\bxu030\b|\bbaski|\bdusus|\btoparlan|\bpanik|\bsatis baskisi/.test(normalize(m.text))) return true;
     if(String(m.reply_to_message?.from?.id)===String(botId)) return true;
     const t=normalize(m.text);
     if((botUsername && m.text.toLowerCase().includes('@'+botUsername.toLowerCase())) || /\bhocam\b|\bhoca\b|\bbot\b/.test(t)) return true;
@@ -404,8 +553,11 @@ function createEngine(store,{now=Date.now,market=marketData,send,botId,botUserna
           const codes=extractCodes(q,new Set(state.symbols));
           const own=memoryFor(state,key,now());
           // Eski surumun bot sorularina verilen cevaplari da okuyabilir
-          if(codes.length) context={owner:key,codes,intent:own.lastIntent || own.waiting?.intent || 'add',
-            waiting:/maliyet/i.test(q)?{kind:'position',intent:own.lastIntent || own.waiting?.intent || 'add'}:null};
+          const pastIntent=[...(own.history || [])].reverse().filter(h=>h.role==='user' && extractCodes(h.text,new Set(state.symbols)).some(c=>codes.includes(c)))
+            .map(h=>findIntent(h.text,codes).intent).find(i=>['add','exit','profit','average'].includes(i));
+          const expected=pastIntent || (['add','exit','profit','average'].includes(own.waiting?.intent)?own.waiting.intent:'add');
+          if(codes.length) context={owner:key,codes,intent:expected,
+            waiting:/maliyet/i.test(q)?{kind:'position',intent:expected,fields:['cost']}:/lot/i.test(q)?{kind:'position',intent:expected,fields:['quantity']}:null};
         }
         const pending=[...state.jobs].reverse().find(j=>j.key===key && !active.has(j.id));
         const details=extractDetails(m.text,state.memories[key]?.waiting || context?.waiting);
@@ -460,8 +612,8 @@ function createEngine(store,{now=Date.now,market=marketData,send,botId,botUserna
       }
       if(job.revision===(state.revisions[job.key] || 0)) state.memories[job.key]=job.memory;
       state.sentAnswers[messageKey]={at:now(),botMessageId:result?.message_id};
-      if(result?.message_id) state.replyContexts[`${job.chatId}:${result.message_id}`]={owner:job.key,codes:job.memory.lastSymbols,
-        intent:job.memory.lastIntent,waiting:job.memory.waiting || null,at:now()};
+      if(result?.message_id) state.replyContexts[`${job.chatId}:${result.message_id}`]={owner:job.key,codes:job.memory.focus?.type==='market'?[]:job.memory.lastSymbols,
+        intent:job.memory.lastIntent,waiting:job.memory.waiting || null,focus:job.memory.focus || null,at:now()};
       state.lastReply[String(job.chatId)]=now();state.jobs=state.jobs.filter(j=>j.id!==job.id);store.save();
     } catch(e) {
       if(e.storage) throw e;
@@ -514,7 +666,7 @@ async function telegram(method, body) {
   return result.result;
 }
 async function main() {
-  console.log('BIST BOT 3.2.0 SOHBET DUZELTMESI');
+  console.log('BIST BOT 3.4.0 TEK SERVER');
   if(!BOT_TOKEN || BOT_TOKEN==='BURAYA_BOT_TOKENINI_YAZ') throw new Error('server.js basindaki BOT_TOKEN alanina tokenini yaz');
   const store=createStore(process.env.DATA_DIR || './data');
   const state=store.state;
@@ -539,7 +691,7 @@ async function main() {
     } catch {console.log('KAP mevcut liste kullaniliyor');}
   }
   await refresh();
-  const worker=setInterval(()=>void engine.tick().catch(e=>{console.error('Kalici sira hatasi',e.message);process.exit(1);}),1000);
+  const worker=setInterval(()=>{if(connected) void engine.tick().catch(e=>{console.error('Kalici sira hatasi',e.message);process.exit(1);});},1000);
   const daily=setInterval(()=>{void refresh();engine.cleanup();},86400000);
   const shutdown=()=>{closing=true;engine.close();clearInterval(worker);clearInterval(daily);server.close();setTimeout(()=>process.exit(0),10000).unref();};
   process.on('SIGTERM',shutdown);process.on('SIGINT',shutdown);
@@ -556,7 +708,7 @@ async function main() {
           if(command==='/unut') engine.forget(m);
           const text=command==='/unut'?'Bu sohbetteki hafızanızı ve bekleyen sorularınızı sildim':command==='/durum'?
             `${state.symbols.length} hisse tanımlı\nBekleyen soru ${state.jobs.length}\nYanıt beklemesi otuz ile altmış saniye\nFiyat kaynağı gecikmeli olabilir`:
-            'Hisseyi veya borsa sorunuzu yazabilirsiniz\nSorularınız ayrı ayrı değerlendirilir\nGeniş kelime eşleştirme ve konuşma hafızası kullanırım hafızanızı /unut ile silebilirsiniz';
+            'Hisseyi veya genel piyasa sorunuzu yazabilirsiniz\nSorularınız ayrı ayrı değerlendirilir\nGeniş kelime eşleştirme ve konuşma hafızası kullanırım hafızanızı /unut ile silebilirsiniz';
           await telegram('sendMessage',{chat_id:m.chat.id,text,message_thread_id:m.message_thread_id,reply_parameters:{message_id:m.message_id,allow_sending_without_reply:false}});
         }
         engine.ingest(update);
@@ -564,12 +716,13 @@ async function main() {
     } catch(e) {
       if(e.storage) throw e;
       connected=false;console.error('Telegram baglanti hatasi',e.message,e.cause?.code || '');
-      if(e.code===409) console.error('Tek replica kullan ayni tokenle calisan diger botu kapat');
+      if(e.code===409) throw new Error('Ayni tokenle baska bot calisiyor tek servis ve tek replica kullanin');
       if(e.code===401) throw new Error('Telegram tokeni gecersiz');
       await sleep(Math.max(5,Number(e.wait || 0))*1000);
     }
   }
 }
-module.exports={createStore,createEngine,extractCodes,parseKap,technical,calculations,literalNumbers,marketData,money,normalize,distance,findIntent,resolve,extractDetails,buildRuleReply,personalizedReply};
+module.exports={marketTopic,marketScope,buildMarketReply,indexNumber,createStore,createEngine,extractCodes,parseKap,technical,calculations,literalNumbers,marketData,money,normalize,distance,findIntent,resolve,extractDetails,buildRuleReply,personalizedReply};
 if(require.main===module) main().catch(e=>{console.error(e.message);process.exit(1);});
+
 
