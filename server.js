@@ -319,7 +319,6 @@ async function buildRuleReply(job,state,now,market) {
   mem.history=[...mem.history,{role:'user',text:job.text},{role:'assistant',text}].slice(-HISTORY_LIMIT);
   return {text,mem};
 }
-
 function memoryFor(state,key,now) {
   const old=state.memories[key];
   if(old && now-old.updatedAt<=TTL) return old;
@@ -406,12 +405,25 @@ function createEngine(store,{now=Date.now,market=marketData,send,botId,botUserna
 }
 async function telegram(method,body) {
   const r=await fetch(`https://api.telegram.org/bot${process.env.BOT_TOKEN}/${method}`,{
-  const r=await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/${method}`,{
     method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body),signal:AbortSignal.timeout(40000)
+  const requestUrl = 'https://api.telegram.org/bot' + BOT_TOKEN + '/' + method;
+  const response = await fetch(requestUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(40000)
   });
   const j=await r.json();
   if(!j.ok) {const e=new Error(`Telegram ${j.error_code} ${j.description || ''}`);e.code=j.error_code;e.wait=j.parameters?.retry_after;throw e;}
   return j.result;
+  const result = await response.json();
+  if (!result.ok) {
+    const error = new Error('Telegram ' + result.error_code + ' ' + (result.description || ''));
+    error.code = result.error_code;
+    error.wait = result.parameters?.retry_after;
+    throw error;
+  }
+  return result.result;
 }
 async function main() {
   if(!process.env.BOT_TOKEN) throw new Error('Railway Variables BOT_TOKEN gerekli');
