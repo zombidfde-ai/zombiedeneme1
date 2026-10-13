@@ -1,8 +1,13 @@
+// ASAGIDAKI IKI DEGERI TIRNAKLARI SILMEDEN KENDI ANAHTARLARINLA DEGISTIR
+const TELEGRAM_BOT_TOKEN = "8579577038:AAFInyB5SHoBqF_Q8lhISGSlsNfMhsNcjnY";
+const GEMINI_API_KEY = "AQ.Ab8RN6L7-t-REIoeS2aYMv5Pd1lpbm0_BXqNU1K7bqMLfolAkg";
+
 /**
  * TELEGRAM BORSA BOTU — TEK SERVER.JS
  * Node.js 22 veya ustu — npm bagimliligi gerektirmez
  * Railway Start Command: node server.js
- * Railway Variables: '8579577038:AAFInyB5SHoBqF_Q8lhISGSlsNfMhsNcjnY'
+ * Anahtarlari yukaridaki iki tirnakli alana yapistirabilirsin
+ * Bu alanlar bos birakilirsa Railway Variables degerleri kullanilir
  * GEMINI_MODEL varsayilan: gemini-3.5-flash-lite
  * GROUP_MODE varsayilan: all
  * Tum grup mesajlari icin BotFather /setprivacy -> Disable
@@ -69,6 +74,10 @@ async function httpJson(url, options = {}) {
 }
 
 function loadConfig(env = process.env) {
+  const keyValue = (pasted, variable) => {
+    const direct = String(pasted || '').trim();
+    return direct && !direct.startsWith('BURAYA_') ? direct : String(variable || '').trim();
+  };
   const integer = (name, fallback, min, max) => {
     const value = env[name] === undefined ? fallback : Number(env[name]);
     if (!Number.isInteger(value) || value < min || value > max) {
@@ -81,8 +90,8 @@ function loadConfig(env = process.env) {
   const allowed = String(env.ALLOWED_CHAT_IDS || '').split(',').map(s => s.trim()).filter(Boolean);
   if (allowed.some(s => !/^-?\d+$/.test(s))) throw new ServiceError('INVALID_ALLOWED_CHAT_IDS');
   return {
-    telegramToken: String(env.TELEGRAM_BOT_TOKEN || '').trim(),
-    geminiApiKey: String(env.GEMINI_API_KEY || '').trim(),
+    telegramToken: keyValue(TELEGRAM_BOT_TOKEN, env.TELEGRAM_BOT_TOKEN),
+    geminiApiKey: keyValue(GEMINI_API_KEY, env.GEMINI_API_KEY),
     geminiModel: env.GEMINI_MODEL || 'gemini-3.5-flash-lite',
     groupMode,
     allowedChats: new Set(allowed),
